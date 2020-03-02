@@ -53,7 +53,7 @@ if __name__ == '__main__':
     n = 0
     model.eval()
     with torch.no_grad():
-        for x, target in dataloaders:
+        for x, target in dataloader_val:
             n = n + 1
             y = model(x)
             y_pred = torch.squeeze(y).numpy()
