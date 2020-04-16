@@ -15,6 +15,21 @@ import copy
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+class SoftDiceLoss(nn.Module): 
+    def __init__(self, weight=None, size_average=True): 
+        super(SoftDiceLoss, self).__init__() 
+
+    def forward(self, logits, targets): 
+        num = targets.size(0) 
+        smooth = 1 
+        probs = F.sigmoid(logits) 
+        m1 = probs.view(num, -1) 
+        m2 = targets.view(num, -1) 
+        intersection = (m1 * m2) 
+        score = 2. * (intersection.sum(1) + smooth) / (m1.sum(1) + m2.sum(1) + smooth) 
+        score = 1 - score.sum() / num 
+        return score
+
 class FocalLoss(nn.Module):
     def __init__(self, gamma=2, alpha=0.5, reduction='mean'):
         super().__init__()
@@ -24,6 +39,7 @@ class FocalLoss(nn.Module):
 
     def forward(self, _input, target):
         pt = torch.sigmoid(_input)
+        pt = pt.clamp(min=0.0001,max=0.9999)
         loss = - self.alpha * (1 - pt) ** self.gamma * target * torch.log(pt) - \
             (1 - self.alpha) * pt ** self.gamma * (1 - target) * torch.log(1 - pt)
 
@@ -34,7 +50,36 @@ class FocalLoss(nn.Module):
             
         return loss
 
-def make_dataset(root):
+class WeightedFocalLoss(nn.Module):
+    def __init__(self, gammas=[0, 1], alpha=0.25, reduction='mean'):
+        super().__init__()
+        self.gammas = gammas
+        self.alpha = alpha
+        self.reduction = reduction
+
+    def forward(self, _input, target, weight = None):
+        pt = torch.sigmoid(_input)
+        
+        loss = torch.zeros_like(_input)
+        for gamma in self.gammas:
+            loss += - self.alpha * (1 - pt) ** gamma * target * torch.log(pt) - \
+                (1 - self.alpha) * pt ** gamma * (1 - target) * torch.log(1 - pt)
+        
+        loss /= len(self.gammas)
+        
+        if weight is None:
+            weight = torch.ones_like(_input).to(device)
+        
+        loss *= weight
+        
+        if self.reduction == 'mean':
+            loss = torch.mean(loss)
+        elif self.reduction == 'sum':
+            loss = torch.sum(loss)
+            
+        return loss*100
+
+def make_dataset_cell(root):
     imgs=[]
     for filename in os.listdir(root):
         tag = filename.split('.')[0][-1]
@@ -44,13 +89,29 @@ def make_dataset(root):
             imgs.append((img,mask))
     return imgs
 
+def make_dataset_gland(root):
+    imgs=[]
+    for filename in os.listdir(root):
+        tag = filename.split('.')[0][-1]
+        if tag != 'o':            
+            img = os.path.join(root, filename)
+            mask=os.path.join(root,filename.split('.')[0] + '_anno.bmp')
+            imgs.append((img,mask))
+    return imgs
+
 
 class GlandDataset(Dataset):
-    def __init__(self, root, transform=None, target_transform=None):
-        imgs = make_dataset(root)
+    def __init__(self, root, dataset_type='dataset_cell', transform=None, target_transform=None):
+        assert dataset_type in ['dataset_cell', 'gland_dataset']
+        if dataset_type == 'dataset_cell':
+            imgs = make_dataset_cell(root)
+        elif dataset_type == 'gland_dataset':
+            imgs = make_dataset_gland(root)
         self.imgs = imgs
         self.transform = transform
         self.target_transform = target_transform
+
+        self.dataset_type = dataset_type
 
     def __getitem__(self, index):
         x_path, y_path = self.imgs[index]
@@ -60,11 +121,15 @@ class GlandDataset(Dataset):
         if self.transform is not None:
             img_x = self.transform(img_x)
         if self.target_transform is not None:
-            img_y = img_y.convert('L')
-            img_y = (self.target_transform(img_y))
-#             img_y = (self.target_transform(img_y) * 255).float() # The output must match the softmax forms
-#             img_label = torch.zeros((1,512,512))
-#             img_label[0,...] = (img_y[0] > 0)
+            if self.dataset_type == 'dataset_cell':
+                img_y = img_y.convert('L')
+                img_y = (self.target_transform(img_y))
+            elif self.dataset_type == 'gland_dataset':
+                img_y = img_y.convert('L')
+                img_y = (self.target_transform(img_y) * 255).float() # The output must match the softmax forms
+                img_label = torch.zeros((1,512,512))
+                img_label[0,...] = (img_y[0] > 0)
+                img_y = img_label
             
         return img_x, img_y
 
@@ -82,7 +147,7 @@ y_transforms = transforms.Compose([
     transforms.ToTensor(),
 ])
 
-def train_model(model, criterion, optimizer, dataloader_train, dataloader_val, num_epochs=20, patience=15): # 这里改了
+def train_model(model, criterion, optimizer, dataloader_train, dataloader_val, num_epochs=20, patience=32): # 这里改了
     min_val_loss = float('inf')
     best_epoch = 0
     best_model = None
@@ -109,24 +174,20 @@ def train_model(model, criterion, optimizer, dataloader_train, dataloader_val, n
             #print("%d/%d,train_loss:%0.3f" % (step, (dt_size - 1) // dataloader_train.batch_size + 1, loss.item()))
         print("epoch %d training loss:%0.3f" % (epoch, epoch_loss/step))
         # ----------------------VALIDATION-----------------------
-        model.eval()
-        epoch_loss = 0
-        step = 0
-        for x, y in dataloader_val:
-            step += 1
-            inputs = x.to(device)
-            labels = y.to(device)
-            # zero the parameter gradients
-            optimizer.zero_grad()
-            # forward
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item()
-            #print("%d/%d,val_loss:%0.3f" % (step, (dt_size - 1) // dataloader_train.batch_size + 1, loss.item()))
-        val_loss = epoch_loss/step
-        print("epoch %d validation loss:%0.3f" % (epoch, val_loss))
+        with torch.no_grad():
+            model.eval()
+            epoch_loss = 0
+            step = 0
+            for x, y in dataloader_val:
+                step += 1
+                inputs = x.to(device)
+                labels = y.to(device)
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+                epoch_loss += loss.item()
+                #print("%d/%d,val_loss:%0.3f" % (step, (dt_size - 1) // dataloader_train.batch_size + 1, loss.item()))
+            val_loss = epoch_loss/step
+            print("epoch %d validation loss:%0.3f" % (epoch, val_loss))
         if val_loss < min_val_loss:
             best_epoch = epoch
             min_val_loss = val_loss

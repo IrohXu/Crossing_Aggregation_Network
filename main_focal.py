@@ -16,7 +16,6 @@ from unetpp import Unet_plus
 from fcn import FCN
 from CAggNet1 import CAggNet as CAggNet1
 from CAggNet2 import CAggNet as CAggNet2
-from CAggNet3 import CAggNet as CAggNet3
 from utils import *
 import argparse
 
@@ -27,10 +26,12 @@ import sys
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', type=int, default='1')
-    parser.add_argument('--model-type', type=str, default='ca2')
+    parser.add_argument('--model-type', type=str, default='ca')
     parser.add_argument('--dataset', type=str, default='dataset_cell')
+    parser.add_argument('--gamma', type=int, default=2)
+    parser.add_argument('--alpha', type=float, default=0.5)
     args = parser.parse_args()
-    assert args.model_type in ['ca', 'unet', 'unetpp', 'fcn', 'ca1', 'ca2', 'ca3']
+    assert args.model_type in ['ca', 'unet', 'unetpp', 'fcn', 'ca1', 'ca2']
     assert args.dataset in ['dataset_cell', 'gland_dataset']
     
     if args.dataset == 'dataset_cell':
@@ -38,7 +39,7 @@ if __name__ == '__main__':
         batch_size = 5
     elif args.dataset == 'gland_dataset':
         IMAGE_SIZE = 512
-        batch_size = 3
+        batch_size = 2
     torch.manual_seed(args.seed)    # reproducible
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -54,13 +55,11 @@ if __name__ == '__main__':
         model = CAggNet1(3, 1).to(device)
     elif args.model_type == 'ca2':
         model = CAggNet2(3, 1).to(device)
-    elif args.model_type == 'ca3':
-        model = CAggNet3(3, 1).to(device)
     else:
         raise Exception('Invalid model type: %s'% args.model_type)
 
     # criterion = nn.MSELoss()
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = FocalLoss()
     optimizer = optim.Adam(model.parameters())
     gland_dataset_train = GlandDataset("%s/train"% args.dataset, dataset_type=args.dataset, transform=x_transforms, target_transform=y_transforms)
     dataloader_train = DataLoader(gland_dataset_train, batch_size=batch_size, shuffle=True, num_workers=0)
@@ -105,4 +104,4 @@ if __name__ == '__main__':
     print('Final_IoU: %s'% IoU)
     print('Final_F1: %s'% F1)
     
-    torch.save(model.state_dict(), './models/%s_%s_seed%s_IoU-%0.4f_F1-%0.4f.pth' % (args.model_type, args.dataset, args.seed, IoU, F1))
+    torch.save(model.state_dict(), './models/focal_alpha-%0.3f_gamma-%i_%s_%s_seed%s_IoU-%0.4f_F1-%0.4f.pth' % (args.alpha, args.gamma, args.model_type, args.dataset, args.seed, IoU, F1))

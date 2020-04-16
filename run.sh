@@ -1,12 +1,13 @@
 #!/bin/bash
 
-rm -r ./logs
 mkdir ./logs
-for model in 'ca' 'unet'
+mkdir ./models
+dataset='gland_dataset'
+for model in 'ca1' 'ca2' 'ca' 'unet' 'unetpp'
 do
-    for seed in {1..10}
+    for seed in {1..2}
     do
-        python3 main.py --seed $seed --model-type $model > "./logs/$model.seed$seed.log"
-	wait
+        python3 main.py --seed $seed --model-type $model --dataset $dataset | tee "./logs/$model.$dataset.seed$seed.log"
+		wait
     done
 done
